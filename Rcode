@@ -1,0 +1,71 @@
+# Load required libraries
+library(sf)  # for spatial data
+library(dplyr)  # for data manipulation
+library(ggplot2)  # for plotting
+library(spgwr)  # for GWR analysis
+
+# Step 1: Load and prepare the data
+# Read the shapefile
+municipalities <- st_read("path_to_your_shapefile.shp")
+
+# Calculate log homicide rate
+# Adding 1 to homicides to handle zero values
+data <- municipalities %>%
+  mutate(
+    homicide_rate = (homicides / population) * 100000,
+    log_homicide_rate = log(homicide_rate),
+    # Standardize the poverty index
+    indice_sd = (indice - mean(indice)) / sd(indice)
+  )
+
+# Step 1: Basic OLS regression
+ols_model <- lm(log_homicide_rate ~ indice, data = data)
+summary(ols_model)
+
+# Get summary statistics
+summary_stats <- sapply(data[c("indice", "homicide_rate")], summary)
+print(summary_stats)
+
+# Step 2: Calculate OLS residuals
+data$residuals <- residuals(ols_model)
+
+# Step 3: Prepare for GWR
+# Convert to appropriate projection (assuming you're using Mexico Albers Equal Area)
+data_projected <- st_transform(data, crs = 6362)  # Mexico Albers Equal Area
+
+# Run GWR
+coords <- st_coordinates(st_centroid(data_projected))
+bw <- gwr.sel(log_homicide_rate ~ indice, 
+              data = as.data.frame(data_projected),
+              coords = coords)
+
+gwr_model <- gwr(log_homicide_rate ~ indice,
+                 data = as.data.frame(data_projected),
+                 coords = coords,
+                 bandwidth = bw)
+
+# Extract coefficients and t-values
+data$gwr_coef <- gwr_model$SDF$indice
+data$gwr_tval <- gwr_model$SDF$indice_TV
+
+# Step 4: Mark significant coefficients (90% confidence)
+t_critical <- qt(0.95, gwr_model$df.null)  # one-tailed test at 0.1 significance
+data$significant <- abs(data$gwr_tval) > t_critical
+data$coef_significant <- ifelse(data$significant, data$gwr_coef, NA)
+
+# Step 5: Distance analysis (after calculating distance in QGIS)
+# Assuming you've added the distance column to your data
+significant_data <- data %>%
+  filter(significant) %>%
+  mutate(log_distance = log(distance_to_border))
+
+distance_model <- lm(gwr_coef ~ log_distance, data = significant_data)
+summary(distance_model)
+
+# Create scatter plot
+ggplot(significant_data, aes(x = log_distance, y = gwr_coef)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(x = "Log Distance to US Border",
+       y = "GWR Coefficient (Poverty Index)",
+       title = "Relationship between GWR Coefficients and Border Distance") 
